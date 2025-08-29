@@ -22,6 +22,7 @@
 #include "mlir/Transforms/Passes.h"
 #include <unsupported/Eigen/KroneckerProduct>
 #include <unsupported/Eigen/MatrixFunctions>
+#include <iostream> /// NOTE
 
 namespace cudaq::opt {
 #define GEN_PASS_DEF_UNITARYSYNTHESIS
@@ -36,6 +37,21 @@ using namespace std::complex_literals;
 namespace {
 
 constexpr double TOL = 1e-7;
+
+void printEigenMatrix(const Eigen::MatrixXcd& mat, const std::string &name) {
+  std::cout << name << ":" << std::endl;
+  std::cout << mat << std::endl;
+}
+
+void printvector(const std::vector<double> &v, const std::string &name){
+  std::cout << name << ":" << std::endl;
+
+  for (const auto &elem: v){
+    std::cout << elem << " ";
+  }
+
+  std::cout << std::endl;
+}
 
 /// Base class for unitary synthesis, i.e. decomposing an arbitrary unitary
 /// matrix into native gate set. The native gate set here includes all the
@@ -462,9 +478,9 @@ Eigen::MatrixXcd createhouseholder(const Eigen::VectorXcd& x){
 
   /// Ensure first entry is real and nonnegative
   assert(std::abs(std::imag((house*x)(0))) < TOL);
-  if(std::real((house*x)(0)) < 0){
-    house = -house;
-  }
+  // if(std::real((house*x)(0)) < 0){
+  //   house = -house;
+  // }
   return house;
 }
 
@@ -477,7 +493,7 @@ Eigen::MatrixXcd createmultiplexor(const Eigen::MatrixXcd &firstmatrix, const Ei
   return multiplexedmatrix;
 }
 
-std::tuple<Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd>
+std::tuple<Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd, std::vector<double>, std::vector<double>>
 blockbidiagonalize(const Eigen::MatrixXcd &matrix){
   int p = 4, q = 4, m = 8;
   std::vector<double> theta, phi;
@@ -524,10 +540,10 @@ blockbidiagonalize(const Eigen::MatrixXcd &matrix){
     Y = left_op.adjoint() * Y;
 
     //Step 12
-    v2 = (std::sin(theta[i])*Y.block(i, p+i, 1, p-i) + std::cos(theta[i])*Y.block(p+i, p+i, 1, p-i)).transpose();
-    if(i<(p-1)){
+    v2 = (std::sin(theta[i])*Y.block(i, q+i, 1, m-q-i) + std::cos(theta[i])*Y.block(p+i, q+i, 1, m-q-i)).transpose();
+    if(i<(q-1)){
       // Step 11
-      v1 = -(std::sin(theta[i])*Y.block(i, i+1, 1, p-i-1) - std::cos(theta[i])*Y.block(p+i, i+1, 1, p-i-1)).transpose();
+      v1 = -(std::sin(theta[i])*Y.block(i, i+1, 1, q-i-1) - std::cos(theta[i])*Y.block(p+i, i+1, 1, q-i-1)).transpose();
 
       // Step 14
       phi.push_back(std::atan2(v1.norm(), v2.norm()));
@@ -554,7 +570,7 @@ blockbidiagonalize(const Eigen::MatrixXcd &matrix){
     P1 = P1 * P1_i;
     P2 = P2 * P2_i;
     Q2 = Q2 * Q2_i;
-    if(i!=(p-1)){
+    if(i!=(q-1)){
       Q1 = Q1 * Q1_i;
     }
   }
@@ -564,14 +580,167 @@ blockbidiagonalize(const Eigen::MatrixXcd &matrix){
 
   Eigen::MatrixXcd reconstructedmatrix = P * Y * Q.adjoint();
   assert(reconstructedmatrix.isApprox(matrix, TOL));
+  assert(P1.isUnitary(TOL));
+  assert(P2.isUnitary(TOL));
+  assert(Q1.isUnitary(TOL));
+  assert(Q2.isUnitary(TOL));
   assert(Y.isUnitary(TOL));
   assert(P.isUnitary(TOL));
   assert(Q.isUnitary(TOL));
 
-
-  return std::make_tuple(P, Y, Q);
+  return std::make_tuple(P1, P2, Y, Q1, Q2, theta, phi);
 }
 
+std::tuple<Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd, Eigen::MatrixXcd>
+contructblocksfromangles(const std::vector<double> &theta, const std::vector<double> &phi, const Eigen::MatrixXcd &B){
+  assert(theta.size() == (phi.size() + 1));
+  int size = theta.size();
+  Eigen::MatrixXcd B11 = Eigen::MatrixXcd::Zero(theta.size(), theta.size());
+  Eigen::MatrixXcd B12 = Eigen::MatrixXcd::Zero(theta.size(), theta.size());
+  Eigen::MatrixXcd B21 = Eigen::MatrixXcd::Zero(theta.size(), theta.size());
+  Eigen::MatrixXcd B22 = Eigen::MatrixXcd::Zero(theta.size(), theta.size());
+
+  std::vector<double> costheta(size);
+  std::vector<double> sintheta(size);
+  std::vector<double> cosphi(size-1);
+  std::vector<double> sinphi(size-1);
+  for (int i=0; i<size; i++){
+    costheta[i] = (std::cos(theta[i]));
+    sintheta[i] = (std::sin(theta[i]));
+    if(i<(size-1)){
+      cosphi[i] = (std::cos(phi[i]));
+      sinphi[i] = (std::sin(phi[i]));
+    }
+  }
+
+  // for (int i=1; i<size; i++){
+  //   B11(i, i) = costheta[i]*cosphi[i-1];
+  //   B21(i, i) = -sintheta[i]*cosphi[i-1];
+  // }
+
+  // for(int i=0; i<size-1; i++){
+  //   B12(i, i) = sintheta[i]*cosphi[i];
+  //   B22(i, i) = costheta[i]*cosphi[i];
+  // }
+
+  // for(int i=0; i<size-1; i++){
+  //   B21(i, i+1) = -costheta[i] * sinphi[i];
+  //   B11(i, i+1) = -sintheta[i] * sinphi[i];
+  // }
+
+
+  // for(int i=0; i<size; i++){
+  //   /// Initialize diagonal elements
+  //   if((i-1) > 0){
+  //     B11(i,i) = costheta[i] * cosphi[i-1];
+  //     B21(i,i) = -sintheta[i] * cosphi[i-1];
+
+  //     /// Initialize Upper Diagonal Elements
+  //     B11(i-1,i) = -sintheta[i-1] * sinphi[i-1];
+  //     B21(i-1,i) = -costheta[i-1] * sinphi[i-1];
+
+  //     /// Initialize Lower Diagonal Elements
+  //     B12(i,i-1) = costheta[i] * sinphi[i-1];
+  //     B22(i,i-1) = -sintheta[i] * sinphi[i-1];
+  //   }
+  //   if((i)<(size-1)){
+  //     B12(i,i) = sintheta[i] * cosphi[i];
+  //     B22(i,i) = costheta[i] * cosphi[i];
+  //   }
+  // }
+  //
+
+  B11(0,0) = costheta[0];
+  for(int i=1; i<size; i++){
+    B11(i,i) = costheta[i] * cosphi[i-1];
+    B11(i-1,i) = -sintheta[i-1] * sinphi[i-1];
+    printEigenMatrix(B11, "B11");
+  }
+
+  for(int i=0; i<size-1; i++){
+    B12(i,i) = sintheta[i] * cosphi[i];
+    B12(i+1,i) = costheta[i+1] * sinphi[i];
+    printEigenMatrix(B12, "B12");
+  }
+  B12(size-1, size-1) = sinphi[size-1];
+  printEigenMatrix(B12, "B12");
+
+  B21(0,0) = -sintheta[0];
+  for(int i=1; i<size; i++){
+    B21(i,i) = -sintheta[i] * cosphi[i-1];
+    B21(i-1,i) = -costheta[i-1] * sinphi[i-1];
+    printEigenMatrix(B21, "B21");
+  }
+
+  for(int i=0; i<size-1; i++){
+    B22(i,i) = costheta[i] * cosphi[i];
+    B22(i+1,i) = -sintheta[i+1] * sinphi[i];
+    printEigenMatrix(B22, "B22");
+  }
+  B22(size-1, size-1) = cosphi[size-1];
+  printEigenMatrix(B22, "B22");
+
+  // /// Initialize remaining elements
+  // /// Initialize remaining elements
+  // B11(0,0) = costheta[0];
+  // B12(size-1, size-1) = sintheta[size-1];
+  // B21(0,0) = -sintheta[0];
+  // B22(size-1, size-1) = costheta[size-1];
+
+  /// NOTE: To be removed
+  // printEigenMatrix(B, "B");
+  // printEigenMatrix(B11, "B11");
+  // printEigenMatrix(B12, "B12");
+  // printEigenMatrix(B21, "B21");
+  // printEigenMatrix(B22, "B22");
+  assert(B.block(0, 0, 4, 4).isApprox(B11, TOL));
+  assert(B.block(0, 4, 4, 4).isApprox(B12, TOL));
+  assert(B.block(4, 0, 4, 4).isApprox(B21, TOL));
+  assert(B.block(4, 4, 4, 4).isApprox(B22, TOL));
+  return std::tuple(B11, B12, B21, B22);
+}
+
+
+std::tuple<int, int> calculate_indexes(const std::vector<double> &phi){
+  int size = phi.size();
+  int max_index = size;
+  int min_index = 0;
+
+  for(int i=size-2; i>=0; i--){
+    if(std::abs(phi[i]) < TOL){
+      max_index = i;
+    }
+    /// Break on largest non-zero element
+    else{
+      break;
+    }
+  }
+
+  // while((min_index <= phi.size()-1) && (phi[min_index-1] == 0)){
+  if(max_index == size){
+    min_index = size-2;
+  }
+  else{
+    min_index = max_index - 1;
+  }
+
+  while((min_index >= 0) && (std::abs(phi[min_index]) > TOL)){
+    min_index--;
+    // for(int i=0; i<size; i++){
+    //   if(std::abs(phi[i]) > TOL){
+    //     min_index = i;
+    //   }
+    //   }
+  }
+  
+  printvector(phi, "phi");
+  printf("min_index = %d, max_index = %d\n", min_index, max_index);
+  return std::make_tuple(min_index, max_index);
+}
+
+// std:tuple<double, double> calculate_shifts(const Eigen::MatrixXcd &submatrix){
+  
+// }
 
 
 /// Result for 3-q CSD decomposition
@@ -597,77 +766,29 @@ struct ThreeQubitOpCSD : public Decomposer {
   std::complex<double> phase;
 
     void decompose() override {
+    /// NOTE: Unsure if necessary
     /// Convert to special unitary to maintain global phase
     /// appropriately for future recursive decomposition
     phase = std::pow(targetMatrix.determinant(), 0.125);
-    auto specialUnitary = targetMatrix / phase;
+    // auto specialUnitary = targetMatrix / phase;
 
-    auto [left, diagonal, right] = blockbidiagonalize(targetMatrix);
-    Eigen::Matrix4cd Q11 = specialUnitary.template block<4, 4>(0, 0);
-    Eigen::Matrix4cd Q12 = specialUnitary.template block<4, 4>(0, 4);
-    Eigen::Matrix4cd Q21 = specialUnitary.template block<4, 4>(4, 0);
-    // Eigen::Matrix4cd Q22 = specialUnitary.template block<4, 4>(4, 4);
+    /// Phase 1
+    auto [P1, P2, B, Q1, Q2, theta_0, phi_0] = blockbidiagonalize(targetMatrix);
+    printEigenMatrix(B, "Bidiagonalized");
+    printvector(theta_0, "theta");
+    printvector(phi_0, "phi");
 
-    /// Stack Q11 and Q12 before decomposing to link the generated SVDs
-    Eigen::MatrixXcd Qx1(8, 4);
-    Qx1 << Q11, Q21;
+    auto [newP1, newP2, newB, newQ1, newQ2, newtheta_0, newphi_0] = blockbidiagonalize(B);
+    printEigenMatrix(newB, "Re - Bidiagonalized");
+    printvector(newtheta_0, "newtheta");
+    printvector(newphi_0, "newphi");
+    auto [B11, B12, B21, B22] = contructblocksfromangles(theta_0, phi_0, newB);
+    auto [min_index, max_index] = calculate_indexes(phi_0);
+    min_index = 0;
+    max_index = min_index;
 
-    /// Compute SVD of stacked matrix
-    Eigen::JacobiSVD<Eigen::MatrixXcd> svd(Qx1, Eigen::ComputeFullU |
-                                                    Eigen::ComputeFullV);
-    Eigen::Matrix4cd U1 = svd.matrixU().block<4, 4>(0, 0);
-    Eigen::Matrix4cd U2 = svd.matrixU().block<4, 4>(4, 0);
-    Eigen::Matrix4cd V1 = svd.matrixV();
-    Eigen::Vector4d svalues = svd.singularValues();
 
-    /// JacobiSVD does not guarantee ordering of Singular Values.
-    /// Hence sort the values and rearrange U1, U2 and V1 as necessary.
-    std::vector<int> reorder(svalues.size());
-    for (int i = 0; i < svalues.size(); i++) {
-      reorder[i] = i;
-    }
 
-    std::sort(reorder.begin(), reorder.end(),
-              [&svalues](int i, int j) { return svalues(i) > svalues(j); });
-
-    Eigen::PermutationMatrix<4> reordermatrix;
-    reordermatrix.indices() = Eigen::Map<Eigen::VectorXi>(reorder.data(), 4);
-
-    components.u1 = U1 * reordermatrix;
-    components.u2 = U2 * reordermatrix;
-    components.v1 = V1 * reordermatrix;
-
-    assert(components.u1.isUnitary(TOL));
-    assert(components.u2.isUnitary(TOL));
-    assert(components.v1.isUnitary(TOL));
-    Eigen::Vector4d svalues_sorted = reordermatrix.transpose() * svalues;
-
-    Eigen::Matrix4cd C = Eigen::Matrix4cd::Zero();
-    Eigen::Matrix4cd S = Eigen::Matrix4cd::Zero();
-
-    /// Create C and S matrices from singularvalues
-    /// Clamp the singular values to avoid errors from floating point
-    for (int i = 0; i < 4; i++) {
-      double theta = std::acos(std::min(svalues_sorted[i], 1.0));
-      C(i, i) = std::cos(theta);
-      S(i, i) = std::sin(theta);
-    }
-
-    components.c = C;
-    components.s = S;
-
-    /// Compute V2 from existing components
-    Eigen::Vector4d s_inv_diag;
-    for (int i = 0; i < 4; i++) {
-      s_inv_diag(i) = (std::abs(components.s(i, i).real()) < TOL)
-                          ? 0
-                          : (1.0 / components.s(i, i).real());
-    }
-    Eigen::Matrix4cd s_inv = s_inv_diag.asDiagonal();
-
-    components.v2 = (Q12.adjoint() * components.u1 * s_inv);
-
-    /// Verify if decomposition matches the original matrix
     // Eigen::Matrix8cd reconstructedmatrix;
     Eigen::Matrix<std::complex<double>, 8, 8> reconstructedmatrix;
     reconstructedmatrix.template block<4,4>(0, 0) = components.u1 * components.c * components.v1;
